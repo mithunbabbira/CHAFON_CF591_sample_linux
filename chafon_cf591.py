@@ -424,27 +424,49 @@ class TagError(CF591Error):
 
 def _load_library():
     """Load the libCFApi.so shared library"""
+    # First, try loading by name (works if in system library path)
+    # This is the most reliable method when library is properly installed
+    try:
+        return ctypes.CDLL('libCFApi.so')
+    except OSError:
+        pass
+    
+    # Then try explicit paths
     lib_paths = [
         '/usr/local/lib/libCFApi.so',
         '/usr/lib/libCFApi.so',
-        os.path.join(os.path.dirname(__file__), 'API/Linux/ARM64/libCFApi.so'),
-        os.path.join(os.path.dirname(__file__), 'API/Linux/ARM/libCFApi.so'),
+        '/usr/lib/aarch64-linux-gnu/libCFApi.so',  # Debian/Ubuntu ARM64 path
+        '/usr/lib/arm-linux-gnueabihf/libCFApi.so',  # Debian/Ubuntu ARM path
+    ]
+    
+    # Add relative paths based on script location
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    lib_paths.extend([
+        os.path.join(script_dir, 'API/Linux/ARM64/libCFApi.so'),
+        os.path.join(script_dir, 'API/Linux/ARM/libCFApi.so'),
+        os.path.join(os.getcwd(), 'API/Linux/ARM64/libCFApi.so'),
+        os.path.join(os.getcwd(), 'API/Linux/ARM/libCFApi.so'),
         './API/Linux/ARM64/libCFApi.so',
         './API/Linux/ARM/libCFApi.so',
-        ctypes.util.find_library('CFApi')
-    ]
+    ])
+    
+    # Try find_library (may return None or partial path)
+    found_lib = ctypes.util.find_library('CFApi')
+    if found_lib:
+        lib_paths.append(found_lib)
     
     for lib_path in lib_paths:
         if lib_path and os.path.exists(lib_path):
             try:
                 return ctypes.CDLL(lib_path)
             except OSError as e:
+                # Log the error for debugging but continue trying
                 continue
     
-    # Try to find in LD_LIBRARY_PATH
+    # Final attempt: try with RTLD_GLOBAL flag (sometimes needed)
     try:
-        return ctypes.CDLL('libCFApi.so')
-    except OSError:
+        return ctypes.CDLL('libCFApi.so', mode=ctypes.RTLD_GLOBAL)
+    except (OSError, AttributeError):
         pass
     
     raise OSError(
@@ -454,7 +476,11 @@ def _load_library():
         "    sudo ldconfig\n"
         "  For older Raspberry Pi (ARM 32-bit):\n"
         "    sudo cp API/Linux/ARM/libCFApi.so /usr/local/lib/\n"
-        "    sudo ldconfig"
+        "    sudo ldconfig\n"
+        "\n"
+        "If already installed, verify with:\n"
+        "    ls -la /usr/local/lib/libCFApi.so\n"
+        "    ldconfig -p | grep libCFApi"
     )
 
 
@@ -506,7 +532,7 @@ class CF591Reader:
         
         self.port = port
         self.baud_rate = baud_rate
-        self._handle = c_int64(-1)
+        self._handle = c_int64(0)  # Initialize to 0, not -1 (library requirement)
         self._is_open = False
         self._is_inventory_running = False
         self._inventory_lock = threading.Lock()
@@ -767,6 +793,32 @@ class CF591Reader:
         if not self._is_open:
             raise ConnectionError("Reader is not open. Call open() first.")
     
+    def _check_result(self, result: int, error_msg: str, 
+                      ignore_codes: List[int] = None) -> int:
+        """
+        Check API result and convert signed to unsigned
+        
+        Args:
+            result: Result code from API (may be signed)
+            error_msg: Error message if result is not OK
+            ignore_codes: List of error codes to ignore (don't raise exception)
+            
+        Returns:
+            Unsigned result code
+        """
+        # Convert signed to unsigned
+        unsigned_result = result & 0xFFFFFFFF
+        
+        if unsigned_result == StatusCode.OK:
+            return unsigned_result
+        
+        # Check if this is an ignorable error
+        if ignore_codes and unsigned_result in ignore_codes:
+            return unsigned_result
+        
+        # Raise exception for other errors
+        raise CommandError(error_msg, result)
+    
     # ========================================================================
     # Device Information Methods
     # ========================================================================
@@ -982,11 +1034,22 @@ class CF591Reader:
         self._check_open()
         
         with self._inventory_lock:
+            # If already running, stop first
+            if self._is_inventory_running:
+                try:
+                    self._lib.InventoryStop(self._handle, c_ushort(1000))
+                except:
+                    pass
+                self._is_inventory_running = False
+            
             result = self._lib.InventoryContinue(
                 self._handle, c_ubyte(inv_count), c_ulong(inv_param)
             )
             
-            if result != StatusCode.OK:
+            # Convert signed error code to unsigned for comparison
+            unsigned_result = result & 0xFFFFFFFF
+            
+            if unsigned_result != StatusCode.OK:
                 raise CommandError("Failed to start inventory", result)
             
             self._is_inventory_running = True
@@ -1001,10 +1064,21 @@ class CF591Reader:
         self._check_open()
         
         with self._inventory_lock:
+            if not self._is_inventory_running:
+                # Already stopped, nothing to do
+                return
+            
             result = self._lib.InventoryStop(self._handle, c_ushort(timeout))
             
-            # Don't raise error for timeout - inventory may have already stopped
-            if result != StatusCode.OK and result != StatusCode.CMD_COMM_TIMEOUT:
+            # Convert signed error code to unsigned for comparison
+            unsigned_result = result & 0xFFFFFFFF
+            
+            # Don't raise error for timeout or inventory stop - these are normal
+            # Timeout means reader already stopped or no response needed
+            # Inventory stop means inventory already completed
+            if (unsigned_result != StatusCode.OK and 
+                unsigned_result != StatusCode.CMD_COMM_TIMEOUT and
+                unsigned_result != StatusCode.CMD_INVENTORY_STOP):
                 raise CommandError("Failed to stop inventory", result)
             
             self._is_inventory_running = False
@@ -1024,9 +1098,12 @@ class CF591Reader:
         tag_info = TagInfo()
         result = self._lib.GetTagUii(self._handle, byref(tag_info), c_ushort(timeout))
         
-        if result == StatusCode.OK:
+        # Convert signed error code to unsigned for comparison
+        unsigned_result = result & 0xFFFFFFFF
+        
+        if unsigned_result == StatusCode.OK:
             return Tag.from_tag_info(tag_info)
-        elif result in (StatusCode.CMD_INVENTORY_STOP, StatusCode.CMD_COMM_TIMEOUT):
+        elif unsigned_result in (StatusCode.CMD_INVENTORY_STOP, StatusCode.CMD_COMM_TIMEOUT):
             return None
         else:
             raise CommandError("Failed to get tag", result)
@@ -1170,37 +1247,55 @@ class CF591Reader:
         """
         self._check_open()
         
-        # Prepare password
-        if password:
-            pwd = (c_ubyte * 4)(*password)
-        else:
-            pwd = (c_ubyte * 4)(0, 0, 0, 0)
+        # Stop inventory if running (memory operations require inventory to be stopped)
+        was_running = self._is_inventory_running
+        if was_running:
+            try:
+                self.stop_inventory(timeout=1000)
+            except:
+                pass
         
-        # Option: 0x01 = match tag first, 0x00 = skip match
-        option = c_ubyte(0x00)
-        
-        result = self._lib.ReadTag(
-            self._handle, option, pwd, c_ubyte(memory_bank),
-            c_ushort(word_ptr), c_ubyte(word_count)
-        )
-        
-        if result != StatusCode.OK:
-            raise TagError("Failed to initiate read command", result)
-        
-        # Get response
-        resp = TagResp()
-        read_count = c_ubyte()
-        read_data = (c_ubyte * 256)()
-        
-        result = self._lib.GetReadTagResp(
-            self._handle, byref(resp), byref(read_count),
-            read_data, c_ushort(timeout)
-        )
-        
-        if result != StatusCode.OK:
-            raise TagError("Failed to read tag memory", result)
-        
-        return bytes(read_data[:read_count.value * 2])
+        try:
+            # Prepare password
+            if password:
+                pwd = (c_ubyte * 4)(*password)
+            else:
+                pwd = (c_ubyte * 4)(0, 0, 0, 0)
+            
+            # Option: 0x01 = match tag first, 0x00 = skip match
+            option = c_ubyte(0x00)
+            
+            result = self._lib.ReadTag(
+                self._handle, option, pwd, c_ubyte(memory_bank),
+                c_ushort(word_ptr), c_ubyte(word_count)
+            )
+            
+            unsigned_result = result & 0xFFFFFFFF
+            if unsigned_result != StatusCode.OK:
+                raise TagError("Failed to initiate read command", result)
+            
+            # Get response
+            resp = TagResp()
+            read_count = c_ubyte()
+            read_data = (c_ubyte * 256)()
+            
+            result = self._lib.GetReadTagResp(
+                self._handle, byref(resp), byref(read_count),
+                read_data, c_ushort(timeout)
+            )
+            
+            unsigned_result = result & 0xFFFFFFFF
+            if unsigned_result != StatusCode.OK:
+                raise TagError("Failed to read tag memory", result)
+            
+            return bytes(read_data[:read_count.value * 2])
+        finally:
+            # Restart inventory if it was running
+            if was_running:
+                try:
+                    self.start_inventory()
+                except:
+                    pass
     
     def write_tag_memory(self, memory_bank: MemoryBank, word_ptr: int,
                          data: bytes, password: bytes = None,
@@ -1353,17 +1448,48 @@ class CF591Reader:
         
         Returns:
             Q value (0-15)
+            
+        Note:
+            This function may not be available on all reader models.
+            Use get_device_parameters()['q_value'] as an alternative.
         """
         self._check_open()
         
-        q_val = c_ubyte()
-        reserved = c_ubyte()
-        result = self._lib.GetCoilPRM(self._handle, byref(q_val), byref(reserved))
+        # Try to get from device parameters first (more reliable)
+        try:
+            params = self.get_device_parameters()
+            return params.get('q_value', 4)  # Default to 4 if not available
+        except:
+            pass
         
-        if result != StatusCode.OK:
-            raise CommandError("Failed to get Q value", result)
+        # Fallback to direct API call
+        # Stop inventory if running (some operations require inventory to be stopped)
+        was_running = self._is_inventory_running
+        if was_running:
+            try:
+                self.stop_inventory(timeout=1000)
+            except:
+                pass
         
-        return q_val.value
+        try:
+            q_val = c_ubyte()
+            reserved = c_ubyte()
+            result = self._lib.GetCoilPRM(self._handle, byref(q_val), byref(reserved))
+            
+            unsigned_result = result & 0xFFFFFFFF
+            if unsigned_result == StatusCode.OK:
+                return q_val.value
+            else:
+                # If API call fails, return from device parameters or default
+                params = self.get_device_parameters()
+                return params.get('q_value', 4)
+        finally:
+            # Restart inventory if it was running
+            if was_running:
+                try:
+                    self.start_inventory()
+                except:
+                    pass
     
     def set_q_value(self, q_value: int):
         """
