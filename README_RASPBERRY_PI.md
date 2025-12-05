@@ -193,3 +193,4 @@ This SDK is provided by CHAFON for use with their RFID readers. Please refer to 
 
 **Happy RFID Reading!** 🏷️
 
+

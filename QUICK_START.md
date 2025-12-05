@@ -211,3 +211,4 @@ For more information:
 - Review the API header file: `API/Linux/CFApi.h`
 - Contact CHAFON support for hardware issues
 
+

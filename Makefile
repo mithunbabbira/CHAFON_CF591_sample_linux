@@ -59,3 +59,4 @@ help:
 	@echo "Current architecture: $(ARCH)"
 	@echo "Library path: $(LIB_DIR)"
 
+
