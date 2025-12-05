@@ -1231,7 +1231,7 @@ class CF591Reader:
     
     def read_tag_memory(self, memory_bank: MemoryBank, word_ptr: int, 
                         word_count: int, password: bytes = None,
-                        timeout: int = 2000) -> bytes:
+                        epc: bytes = None, timeout: int = 2000) -> bytes:
         """
         Read tag memory
         
@@ -1240,6 +1240,7 @@ class CF591Reader:
             word_ptr: Starting word address (1 word = 2 bytes)
             word_count: Number of words to read
             password: Access password (4 bytes) or None for no password
+            epc: EPC bytes of the tag to read (optional, but recommended for reliable operation)
             timeout: Timeout in milliseconds
             
         Returns:
@@ -1255,15 +1256,33 @@ class CF591Reader:
             except:
                 pass
         
+        # Store original filter state
+        original_mask_set = False
+        
         try:
+            # If EPC is provided, set select mask to target this specific tag
+            if epc:
+                # EPC in TagInfo starts at bit 32 (after CRC and PC)
+                mask_ptr = 32
+                mask_bits = len(epc) * 8
+                try:
+                    self.set_select_mask(mask_ptr, mask_bits, epc)
+                    original_mask_set = True
+                    # Small delay to ensure mask is set
+                    import time
+                    time.sleep(0.15)
+                except:
+                    pass  # Continue even if mask setting fails
+            
             # Prepare password
             if password:
                 pwd = (c_ubyte * 4)(*password)
             else:
                 pwd = (c_ubyte * 4)(0, 0, 0, 0)
             
-            # Option: 0x01 = match tag first, 0x00 = skip match
-            option = c_ubyte(0x00)
+            # Option: 0x01 = match tag first (use select mask), 0x00 = skip match
+            # Always use 0x01 when we have EPC to ensure tag is matched
+            option = c_ubyte(0x01 if epc else 0x00)
             
             result = self._lib.ReadTag(
                 self._handle, option, pwd, c_ubyte(memory_bank),
@@ -1286,10 +1305,25 @@ class CF591Reader:
             
             unsigned_result = result & 0xFFFFFFFF
             if unsigned_result != StatusCode.OK:
-                raise TagError("Failed to read tag memory", result)
+                # Provide more helpful error message
+                if unsigned_result == StatusCode.CMD_COMM_TIMEOUT:
+                    raise TagError(
+                        "Failed to read tag memory: Communication timeout. "
+                        "Ensure the tag is still in range and supports memory reading.", 
+                        result
+                    )
+                else:
+                    raise TagError("Failed to read tag memory", result)
             
             return bytes(read_data[:read_count.value * 2])
         finally:
+            # Clear select mask if we set it
+            if original_mask_set:
+                try:
+                    self.clear_filter()
+                except:
+                    pass
+            
             # Restart inventory if it was running
             if was_running:
                 try:
@@ -1299,7 +1333,7 @@ class CF591Reader:
     
     def write_tag_memory(self, memory_bank: MemoryBank, word_ptr: int,
                          data: bytes, password: bytes = None,
-                         timeout: int = 2000):
+                         epc: bytes = None, timeout: int = 2000):
         """
         Write data to tag memory
         
@@ -1308,6 +1342,7 @@ class CF591Reader:
             word_ptr: Starting word address
             data: Data to write (must be even number of bytes)
             password: Access password (4 bytes) or None
+            epc: EPC bytes of the tag to write (optional, but recommended for reliable operation)
             timeout: Timeout in milliseconds
         """
         self._check_open()
@@ -1317,33 +1352,77 @@ class CF591Reader:
         
         word_count = len(data) // 2
         
-        # Prepare password
-        if password:
-            pwd = (c_ubyte * 4)(*password)
-        else:
-            pwd = (c_ubyte * 4)(0, 0, 0, 0)
+        # Stop inventory if running (memory operations require inventory to be stopped)
+        was_running = self._is_inventory_running
+        if was_running:
+            try:
+                self.stop_inventory(timeout=1000)
+            except:
+                pass
         
-        # Prepare data
-        write_data = (c_ubyte * len(data))(*data)
+        # Store original filter state
+        original_mask_set = False
         
-        option = c_ubyte(0x00)
-        
-        result = self._lib.WriteTag(
-            self._handle, option, pwd, c_ubyte(memory_bank),
-            c_ushort(word_ptr), c_ubyte(word_count), write_data
-        )
-        
-        if result != StatusCode.OK:
-            raise TagError("Failed to initiate write command", result)
-        
-        # Get response
-        resp = TagResp()
-        result = self._lib.GetTagResp(
-            self._handle, c_ushort(0x0004), byref(resp), c_ushort(timeout)
-        )
-        
-        if result != StatusCode.OK:
-            raise TagError("Failed to write tag memory", result)
+        try:
+            # If EPC is provided, set select mask to target this specific tag
+            if epc:
+                # EPC in TagInfo starts at bit 32 (after CRC and PC)
+                mask_ptr = 32
+                mask_bits = len(epc) * 8
+                try:
+                    self.set_select_mask(mask_ptr, mask_bits, epc)
+                    original_mask_set = True
+                    # Small delay to ensure mask is set
+                    import time
+                    time.sleep(0.1)
+                except:
+                    pass  # Continue even if mask setting fails
+            
+            # Prepare password
+            if password:
+                pwd = (c_ubyte * 4)(*password)
+            else:
+                pwd = (c_ubyte * 4)(0, 0, 0, 0)
+            
+            # Prepare data
+            write_data = (c_ubyte * len(data))(*data)
+            
+            # Option: 0x01 = match tag first, 0x00 = skip match
+            # Use 0x01 if we have an EPC to match, otherwise 0x00
+            option = c_ubyte(0x01 if epc else 0x00)
+            
+            result = self._lib.WriteTag(
+                self._handle, option, pwd, c_ubyte(memory_bank),
+                c_ushort(word_ptr), c_ubyte(word_count), write_data
+            )
+            
+            unsigned_result = result & 0xFFFFFFFF
+            if unsigned_result != StatusCode.OK:
+                raise TagError("Failed to initiate write command", result)
+            
+            # Get response
+            resp = TagResp()
+            result = self._lib.GetTagResp(
+                self._handle, c_ushort(0x0004), byref(resp), c_ushort(timeout)
+            )
+            
+            unsigned_result = result & 0xFFFFFFFF
+            if unsigned_result != StatusCode.OK:
+                raise TagError("Failed to write tag memory", result)
+        finally:
+            # Clear select mask if we set it
+            if original_mask_set:
+                try:
+                    self.clear_filter()
+                except:
+                    pass
+            
+            # Restart inventory if it was running
+            if was_running:
+                try:
+                    self.start_inventory()
+                except:
+                    pass
     
     def write_tag_epc(self, new_epc: bytes, password: bytes = None):
         """

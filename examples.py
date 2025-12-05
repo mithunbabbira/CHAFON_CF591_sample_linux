@@ -229,30 +229,36 @@ def example_tag_memory_operations():
             return
         
         print(f"Tag found: {tag.epc}")
+        print("\n⚠️  IMPORTANT: Keep the tag in range during memory operations!")
+        print("   Some tags may not support memory reading or may require passwords.")
         
         # Read TID (Tag Identifier - unique manufacturer ID, read-only)
         print("\nReading TID memory...")
         try:
-            tid = reader.read_tag_memory(MemoryBank.TID, 0, 6)
-            print(f"  TID: {tid.hex().upper()}")
+            # Try with longer timeout and ensure tag is selected
+            tid = reader.read_tag_memory(MemoryBank.TID, 0, 6, epc=tag.epc_bytes, timeout=3000)
+            print(f"  ✓ TID: {tid.hex().upper()}")
         except Exception as e:
-            print(f"  Failed to read TID: {e}")
+            print(f"  ✗ Failed to read TID: {e}")
+            print("     Note: Some tags may not support TID reading or may be locked.")
         
         # Read EPC memory
         print("\nReading EPC memory...")
         try:
-            epc = reader.read_tag_memory(MemoryBank.EPC, 0, 8)
-            print(f"  EPC Memory: {epc.hex().upper()}")
+            epc = reader.read_tag_memory(MemoryBank.EPC, 0, 8, epc=tag.epc_bytes, timeout=3000)
+            print(f"  ✓ EPC Memory: {epc.hex().upper()}")
         except Exception as e:
-            print(f"  Failed to read EPC: {e}")
+            print(f"  ✗ Failed to read EPC: {e}")
+            print("     Note: EPC memory may be locked or the tag may not support reading.")
         
         # Read USER memory (if available)
         print("\nReading USER memory...")
         try:
-            user = reader.read_tag_memory(MemoryBank.USER, 0, 4)
-            print(f"  USER: {user.hex().upper()}")
+            user = reader.read_tag_memory(MemoryBank.USER, 0, 4, epc=tag.epc_bytes, timeout=3000)
+            print(f"  ✓ USER: {user.hex().upper()}")
         except Exception as e:
-            print(f"  Failed to read USER: {e}")
+            print(f"  ✗ Failed to read USER: {e}")
+            print("     Note: USER memory may not exist on this tag or may require a password.")
         
         # Writing example (COMMENTED OUT - uncomment to test)
         # WARNING: This will modify the tag!
@@ -361,12 +367,17 @@ def example_q_value_optimization():
         
         for q in [2, 4, 8]:
             reader.set_q_value(q)
+            # Small delay to ensure Q value is set
+            time.sleep(0.2)
             
             start = time.time()
             tags = reader.read_tags(max_tags=50, timeout=500, max_timeouts=2)
             elapsed = time.time() - start
             
             print(f"\n  Q={q}: Found {len(tags)} tags in {elapsed:.2f}s")
+            
+            # Small delay between tests
+            time.sleep(0.2)
         
         # Restore original
         reader.set_q_value(original_q)
