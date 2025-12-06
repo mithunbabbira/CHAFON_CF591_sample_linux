@@ -86,10 +86,36 @@ def main():
         print(f"✓ RF power set to {power} dBm")
         print()
         
+        # Ensure inventory is stopped first (in case it was running from previous session)
+        print("Initializing reader state...")
+        try:
+            reader.stop_inventory()
+        except:
+            pass  # Ignore errors - might not be running
+        
+        # Small delay to let reader settle
+        time.sleep(0.3)
+        
         # Start inventory once and keep it running (more efficient)
         print("Starting inventory (will keep running in background)...")
-        reader.start_inventory()
-        print("✓ Inventory started")
+        inventory_started = False
+        max_retries = 3
+        
+        for attempt in range(max_retries):
+            try:
+                reader.start_inventory()
+                inventory_started = True
+                print("✓ Inventory started")
+                break
+            except CF591Error as e:
+                if attempt < max_retries - 1:
+                    print(f"  Retry {attempt + 1}/{max_retries}...", end="", flush=True)
+                    time.sleep(0.5)  # Wait before retry
+                else:
+                    print(f"\n⚠ Warning: Failed to start inventory initially: {e}")
+                    print("  Will attempt to start when you press '1' for the first time.")
+                    inventory_started = False
+        
         print()
         
         # Main loop
@@ -104,6 +130,18 @@ def main():
             if user_input != '1':
                 print("Invalid input. Please press '1' to read or 'q' to quit.")
                 continue
+            
+            # Ensure inventory is running (in case it failed to start initially)
+            if not inventory_started:
+                try:
+                    print("Starting inventory...", end="", flush=True)
+                    reader.start_inventory()
+                    inventory_started = True
+                    print(" ✓")
+                except CF591Error as e:
+                    print(f" ✗ Failed: {e}")
+                    print("Please try again or check your reader connection.")
+                    continue
             
             # Clear any buffered tags first (flush old tags)
             print("\n" + "-" * 60)
