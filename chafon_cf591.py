@@ -933,6 +933,90 @@ class CF591Reader:
             raise CommandError("Failed to reboot device", result)
     
     # ========================================================================
+    # Buzzer Control Methods
+    # ========================================================================
+    
+    def get_buzzer(self) -> Dict[str, Any]:
+        """
+        Get current buzzer settings
+        
+        Returns:
+            Dictionary with:
+            - enabled: bool - Whether buzzer is enabled
+            - duration: int - Buzzer duration (0-255, typically in 10ms units)
+        """
+        self._check_open()
+        
+        params = DevicePara()
+        result = self._lib.GetDevicePara(self._handle, byref(params))
+        if result != StatusCode.OK:
+            raise CommandError("Failed to get buzzer settings", result)
+        
+        buzzer_time = params.BUZZERTIME
+        return {
+            'enabled': buzzer_time > 0,
+            'duration': buzzer_time
+        }
+    
+    def set_buzzer(self, enabled: bool = True, duration: int = 5):
+        """
+        Enable or disable buzzer and set duration
+        
+        Args:
+            enabled: True to enable buzzer, False to disable
+            duration: Buzzer duration when enabled (0-255)
+                     Typically in 10ms units (e.g., 5 = 50ms, 10 = 100ms)
+                     Set to 0 to disable buzzer
+        
+        Note:
+            - When enabled, buzzer will sound on tag detection
+            - Duration is typically in 10ms units (check device documentation)
+            - Setting enabled=False or duration=0 will disable buzzer
+        """
+        self._check_open()
+        
+        if not 0 <= duration <= 255:
+            raise ValueError("Duration must be between 0 and 255")
+        
+        # Get current parameters
+        params = DevicePara()
+        result = self._lib.GetDevicePara(self._handle, byref(params))
+        if result != StatusCode.OK:
+            raise CommandError("Failed to get current parameters", result)
+        
+        # Set buzzer time (0 = disabled, >0 = enabled with duration)
+        if enabled:
+            params.BUZZERTIME = duration if duration > 0 else 5  # Default to 5 if 0 provided but enabled
+        else:
+            params.BUZZERTIME = 0
+        
+        result = self._lib.SetDevicePara(self._handle, params)
+        if result != StatusCode.OK:
+            raise CommandError("Failed to set buzzer settings", result)
+    
+    def enable_buzzer(self, duration: int = 5):
+        """
+        Enable buzzer with specified duration
+        
+        Args:
+            duration: Buzzer duration (0-255, typically in 10ms units)
+                    Default: 5 (50ms)
+        
+        Example:
+            reader.enable_buzzer(10)  # Enable with 100ms duration
+        """
+        self.set_buzzer(enabled=True, duration=duration)
+    
+    def disable_buzzer(self):
+        """
+        Disable buzzer (no sound on tag detection)
+        
+        Example:
+            reader.disable_buzzer()
+        """
+        self.set_buzzer(enabled=False, duration=0)
+    
+    # ========================================================================
     # Power Control Methods (Controls Reading Range)
     # ========================================================================
     

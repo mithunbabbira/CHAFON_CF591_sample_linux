@@ -64,8 +64,9 @@ def main():
     print(f"Timeout: {DEFAULT_TIMEOUT / 1000:.0f} seconds")
     print()
     print("Instructions:")
-    print("  - Press '1' and Enter to start reading")
+    print("  - Press '1' and Enter to start reading (buzzer enabled)")
     print("  - Reading will stop automatically after detecting one tag")
+    print("  - Buzzer will sound when tag is detected")
     print("  - Press '1' again to read another tag")
     print("  - Press 'q' and Enter to quit")
     print("=" * 60)
@@ -143,6 +144,12 @@ def main():
                     print("Please try again or check your reader connection.")
                     continue
             
+            # Enable buzzer for this read cycle
+            try:
+                reader.enable_buzzer(duration=5)  # Enable buzzer (50ms beep)
+            except CF591Error as e:
+                print(f"⚠ Warning: Could not enable buzzer: {e}")
+            
             # Clear any buffered tags first (flush old tags)
             print("\n" + "-" * 60)
             print("Reading RFID tag...")
@@ -213,9 +220,21 @@ def main():
                     print()
                     print("✓ Tag read successfully")
                     print()
+                    
+                    # Disable buzzer after tag detection
+                    try:
+                        reader.disable_buzzer()
+                    except CF591Error as e:
+                        print(f"⚠ Warning: Could not disable buzzer: {e}")
                 else:
                     print("\n✗ No tag detected within timeout")
                     print()
+                    
+                    # Disable buzzer if no tag detected (cleanup)
+                    try:
+                        reader.disable_buzzer()
+                    except CF591Error:
+                        pass
             
             except CF591Error as e:
                 print(f"\n✗ Error reading tag: {e}")
