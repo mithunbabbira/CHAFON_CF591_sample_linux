@@ -38,12 +38,12 @@ DEFAULT_RF_POWER = 26  # Maximum range (~5-7m)
 DEFAULT_PORT = '/dev/ttyUSB0'
 DEFAULT_TIMEOUT = 10000  # 10 seconds timeout for reading
 
-# Optimization constants - Optimized for speed
+# Optimization constants - Optimized for maximum speed
 BUZZER_DURATION = 5  # Buzzer duration (50ms beep)
-BUFFER_FLUSH_TIMEOUT = 20  # Very fast timeout for buffer flushing (ms)
-TAG_POLL_TIMEOUT = 50  # Very fast polling for new tags (ms) - reduced for speed
-BUFFER_FLUSH_MAX_TIME = 0.15  # Max time to spend flushing (seconds) - minimal
-BUFFER_FLUSH_CONSECUTIVE = 2  # Consecutive timeouts needed - minimal for speed
+BUFFER_FLUSH_TIMEOUT = 20  # Fast timeout for buffer flushing (ms)
+TAG_POLL_TIMEOUT = 50  # Fast polling for new tags (ms) - balanced for speed
+BUFFER_FLUSH_MAX_TIME = 0.05  # Max time to spend flushing (seconds) - very minimal
+BUFFER_FLUSH_CONSECUTIVE = 1  # Consecutive timeouts needed - minimal for speed (single timeout = empty)
 
 
 # ============================================================================
@@ -78,46 +78,53 @@ def disable_buzzer_safe(reader, max_retries=3, delay=0.1):
     return False
 
 
+def set_rf_power_safe(reader, power, max_retries=3, initial_delay=0.3):
+    """
+    Set RF power with retry logic to handle intermittent communication errors.
+    
+    The device may need time to initialize after connection, or may experience
+    temporary communication issues. This function retries with increasing delays.
+    """
+    for retry in range(max_retries):
+        try:
+            if retry > 0:
+                # Exponential backoff: 0.3s, 0.5s, 0.8s
+                delay = initial_delay * (1.5 ** retry)
+                time.sleep(delay)
+            reader.set_rf_power(power)
+            return True
+        except CF591Error as e:
+            if retry < max_retries - 1:
+                print(f"  Retry {retry + 1}/{max_retries}...", end="", flush=True)
+                continue
+            else:
+                # Last retry failed, re-raise the exception
+                raise
+    return False
+
+
 def flush_buffer_aggressive(reader):
     """
     Aggressively flush all buffered tags for clean reading - optimized for speed.
     Returns count of flushed tags.
+    NOTE: This function is now deprecated - we restart inventory instead for faster performance.
     """
+    # Quick single-pass flush
     flush_count = 0
-    consecutive_timeouts = 0
     flush_start = time.time()
     
-    # Stop inventory temporarily for cleaner buffer flush
-    try:
-        reader.stop_inventory()
-        time.sleep(0.01)  # Minimal delay
-    except:
-        pass
-    
-    # Flush all buffered tags quickly - minimal iterations for speed
-    while consecutive_timeouts < BUFFER_FLUSH_CONSECUTIVE:
-        # Check timeout - strict limit
+    # Quick flush - just check a couple times
+    for _ in range(3):
         if (time.time() - flush_start) > BUFFER_FLUSH_MAX_TIME:
             break
-        
         try:
             old_tag = reader.get_tag(timeout=BUFFER_FLUSH_TIMEOUT)
             if old_tag:
                 flush_count += 1
-                consecutive_timeouts = 0
             else:
-                consecutive_timeouts += 1
-        except CF591Error:
-            consecutive_timeouts += 1
+                break  # No more tags
         except:
-            consecutive_timeouts += 1
-    
-    # Restart inventory for fresh reading
-    try:
-        reader.start_inventory()
-        time.sleep(0.02)  # Minimal delay for faster restart
-    except:
-        pass
+            break
     
     return flush_count
 
@@ -165,9 +172,18 @@ def main():
         reader.open()
         print("✓ Connected successfully")
         
-        # Set RF power
-        print(f"Setting RF power to {power} dBm...")
-        reader.set_rf_power(power)
+        # Give device time to fully initialize after connection
+        # This helps prevent intermittent "Failed to set RF power" errors
+        time.sleep(0.2)
+        
+        # Set RF power with retry logic to handle intermittent communication errors
+        print(f"Setting RF power to {power} dBm...", end="", flush=True)
+        try:
+            set_rf_power_safe(reader, power, max_retries=3, initial_delay=0.3)
+            print(" ✓")
+        except CF591Error as e:
+            print(f" ✗")
+            raise
         
         # Verify power was set correctly
         actual_power = reader.get_rf_power()
@@ -175,36 +191,51 @@ def main():
             print(f"✓ RF power set to {power} dBm (verified)")
         else:
             print(f"⚠ Warning: Requested {power} dBm, but device reports {actual_power} dBm")
+        
+        # Optimize for fast single-tag reading
+        print("Optimizing for fast reading...", end="", flush=True)
+        try:
+            # Get current parameters to preserve other settings
+            current_params = reader.get_device_parameters()
+            
+            # Set Q value to 0 for fastest single tag detection
+            # Lower Q = faster for few tags, Higher Q = better for many tags
+            # Q=0 is optimal for single tag trigger-based reading
+            if current_params.get('q_value', 4) != 0:
+                reader.set_q_value(0)
+            
+            # Set session to S0 (0) for fastest tag response
+            # S0 = fastest response, best for single tag reads
+            if current_params.get('session', 0) != 0:
+                reader.set_device_parameters(session=0)
+            
+            print(" ✓")
+        except CF591Error as e:
+            print(f" ⚠ (optimization warning: {e})")
+        except Exception as e:
+            print(f" ⚠ (optimization skipped: {e})")
+        
         print()
         
-        # Initialize reader state
+        # Initialize reader state - start inventory and keep it running
         print("Initializing reader state...")
         try:
             reader.stop_inventory()
         except:
             pass
         
-        time.sleep(0.2)  # Short delay for device to settle
+        # Start inventory and keep it running continuously (like sample code)
+        print("Starting inventory...", end="", flush=True)
+        try:
+            reader.start_inventory()
+            print(" ✓")
+            time.sleep(0.05)  # Small delay for inventory to stabilize
+        except CF591Error as e:
+            print(f" ✗ Failed: {e}")
+            print("Please check your reader connection.")
+            sys.exit(1)
         
-        # Start inventory
-        print("Starting inventory...")
-        inventory_started = False
-        for attempt in range(3):
-            try:
-                reader.start_inventory()
-                inventory_started = True
-                print("✓ Inventory started")
-                time.sleep(0.2)  # Short delay for device to be ready
-                break
-            except CF591Error as e:
-                if attempt < 2:
-                    print(f"  Retry {attempt + 1}/3...", end="", flush=True)
-                    time.sleep(0.3)
-                else:
-                    print(f"\n⚠ Warning: Failed to start inventory initially: {e}")
-                    print("  Will attempt to start when you press '1' for the first time.")
-                    inventory_started = False
-        
+        print("✓ Ready for reading (inventory running continuously)")
         print()
         
         # Main loop
@@ -225,35 +256,32 @@ def main():
             read_start_datetime = datetime.now()
             print(f"\n[Timestamp: {read_start_datetime.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}] Reading started")
             
-            # Ensure inventory is running
-            if not inventory_started:
-                try:
-                    print("Starting inventory...", end="", flush=True)
-                    reader.start_inventory()
-                    inventory_started = True
-                    print(" ✓")
-                    time.sleep(0.2)
-                except CF591Error as e:
-                    print(f" ✗ Failed: {e}")
-                    print("Please try again or check your reader connection.")
-                    continue
-            
-            # Clear buffer FIRST (before enabling buzzer) for speed
+            # Clear any buffered tags quickly (inventory is already running)
             print("\n" + "-" * 60)
             print("Reading RFID tag...")
             print("(Place tag near reader)")
             print("-" * 60)
             
-            print("Flushing buffer...", end="", flush=True)
-            flush_count = flush_buffer_aggressive(reader)
+            # Quick buffer clear - read and discard any existing tags
+            flush_count = 0
+            flush_start = time.time()
+            while (time.time() - flush_start) < 0.05:  # Max 50ms for flushing
+                try:
+                    old_tag = reader.get_tag(timeout=BUFFER_FLUSH_TIMEOUT)
+                    if old_tag:
+                        flush_count += 1
+                    else:
+                        break  # No more tags
+                except:
+                    break
             
             if flush_count > 0:
-                print(f" (cleared {flush_count} old tag(s))")
+                print(f"Flushed {flush_count} old tag(s)")
             else:
-                print(" (buffer was empty)")
+                print("Ready for new tag")
             
-            # Enable buzzer (with retry) - after buffer flush
-            enable_buzzer_safe(reader, max_retries=2, delay=0.1)  # Reduced retries for speed
+            # Enable buzzer (with retry) - minimal delay
+            enable_buzzer_safe(reader, max_retries=1, delay=0.05)  # Minimal retries
             
             # No delay - start reading immediately
             
@@ -263,7 +291,7 @@ def main():
             timeout_sec = DEFAULT_TIMEOUT / 1000.0
             
             try:
-                # Aggressive polling loop - no delays
+                # Ultra-aggressive polling loop - minimal timeout for fastest detection
                 while (time.time() - start_time) < timeout_sec:
                     tag = reader.get_tag(timeout=TAG_POLL_TIMEOUT)
                     if tag:
@@ -271,14 +299,9 @@ def main():
                         try:
                             reader.disable_buzzer()
                         except CF591Error:
-                            # Single retry if needed
-                            try:
-                                time.sleep(0.02)
-                                reader.disable_buzzer()
-                            except CF591Error:
-                                pass
+                            pass  # Don't retry, just continue
                         break
-                    # Continue immediately - no sleep
+                    # Continue immediately - no sleep, loop as fast as possible
                 
                 if tag:
                     # Record timestamp when tag is detected
