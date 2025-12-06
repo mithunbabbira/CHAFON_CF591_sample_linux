@@ -36,7 +36,8 @@ DEFAULT_RF_POWER = 26  # Maximum range (~5-7m)
 #   16-20: Medium-long range (~3-5m)
 #   21-26: Long range (~5-7m)
 
-DEFAULT_PORT = '/dev/ttyUSB1'
+# Try to use persistent symlink first, fallback to auto-detection
+DEFAULT_PORT = '/dev/rfid_reader'  # Created by udev rule (see setup instructions)
 DEFAULT_TIMEOUT = 10000  # 10 seconds timeout for reading
 
 # Optimization constants - Optimized for maximum speed
@@ -50,6 +51,40 @@ BUFFER_FLUSH_MAX_COUNT = 500  # Maximum number of tags to flush (prevent infinit
 # ============================================================================
 # Helper Functions
 # ============================================================================
+
+def find_rfid_device():
+    """
+    Auto-detect RFID reader device by scanning USB serial ports.
+    Looks for FTDI devices (common for CHAFON readers).
+    """
+    import glob
+    
+    # First try the persistent symlink
+    if os.path.exists('/dev/rfid_reader'):
+        return '/dev/rfid_reader'
+    
+    # Try to find by vendor/model ID using udev
+    try:
+        import subprocess
+        for dev in glob.glob('/dev/ttyUSB*'):
+            try:
+                result = subprocess.run(
+                    ['udevadm', 'info', '--name', dev],
+                    capture_output=True, text=True, timeout=1
+                )
+                if 'ID_VENDOR_ID=0403' in result.stdout and 'FTDI' in result.stdout:
+                    return dev
+            except:
+                continue
+    except:
+        pass
+    
+    # Fallback: return first available ttyUSB device
+    devices = sorted(glob.glob('/dev/ttyUSB*'))
+    if devices:
+        return devices[0]
+    
+    return None
 
 def enable_buzzer_safe(reader, max_retries=3, delay=0.3):
     """Enable buzzer with retry logic and proper delays"""
@@ -143,11 +178,63 @@ def start_inventory_safe(reader, max_retries=5, initial_delay=0.2):
 # Main Function
 # ============================================================================
 
+def find_rfid_device():
+    """
+    Auto-detect RFID reader device by scanning USB serial ports.
+    Looks for FTDI devices (common for CHAFON readers).
+    """
+    import glob
+    
+    # First try the persistent symlink
+    if os.path.exists('/dev/rfid_reader'):
+        return '/dev/rfid_reader'
+    
+    # Try to find by vendor/model ID using udev
+    try:
+        import subprocess
+        for dev in glob.glob('/dev/ttyUSB*'):
+            try:
+                result = subprocess.run(
+                    ['udevadm', 'info', '--name', dev],
+                    capture_output=True, text=True, timeout=1
+                )
+                if 'ID_VENDOR_ID=0403' in result.stdout and 'FTDI' in result.stdout:
+                    return dev
+            except:
+                continue
+    except:
+        pass
+    
+    # Fallback: return first available ttyUSB device
+    devices = sorted(glob.glob('/dev/ttyUSB*'))
+    if devices:
+        return devices[0]
+    
+    return None
+
+
 def main():
     """Main trigger-based reading loop"""
     
-    # Get port and power from command line arguments
-    port = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_PORT
+    # Get port from command line or auto-detect
+    if len(sys.argv) > 1:
+        port = sys.argv[1]
+    else:
+        # Try auto-detection first
+        port = find_rfid_device()
+        if not port:
+            # Fallback to default
+            port = DEFAULT_PORT
+            if not os.path.exists(port):
+                print("⚠ Warning: Default port not found, attempting auto-detection...")
+                port = find_rfid_device()
+                if not port:
+                    print(f"✗ Error: Could not find RFID reader device")
+                    print(f"\nTroubleshooting:")
+                    print(f"  1. Check if device is connected: ls /dev/ttyUSB*")
+                    print(f"  2. Specify port manually: python3 {sys.argv[0]} /dev/ttyUSB2")
+                    print(f"  3. Set up persistent device name (see README)")
+                    sys.exit(1)
     try:
         power = int(sys.argv[2]) if len(sys.argv) > 2 else DEFAULT_RF_POWER
         if power < 0 or power > 26:
