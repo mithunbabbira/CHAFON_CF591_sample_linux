@@ -26,7 +26,7 @@ from chafon_cf591 import CF591Reader, CF591Error
 # ============================================================================
 
 # RF Output Power: 0-26 dBm (hardcoded)
-DEFAULT_RF_POWER = 20  # Medium range (~5-7 meters)
+DEFAULT_RF_POWER = 1  # Medium range (~5-7 meters)
 # Adjust this value based on your needs:
 #   0-5:   Very short range (~0.5-2m)
 #   6-10:  Short range (~2-3m)
@@ -111,15 +111,41 @@ def main():
             print("(Place tag near reader)")
             print("-" * 60)
             
-            # Flush any old tags from buffer
-            start_flush = time.time()
-            while (time.time() - start_flush) < 0.1:  # 100ms flush
+            # Aggressively flush ALL old tags from buffer
+            # Keep flushing until we get a timeout (no more tags)
+            print("Flushing old tags from buffer...", end="", flush=True)
+            flush_count = 0
+            flush_start = time.time()
+            consecutive_timeouts = 0
+            
+            while consecutive_timeouts < 3:  # Need 3 consecutive timeouts to be sure
                 try:
-                    reader.get_tag(timeout=50)  # Quick read to clear buffer
+                    old_tag = reader.get_tag(timeout=100)  # Quick read to clear buffer
+                    if old_tag:
+                        flush_count += 1
+                        consecutive_timeouts = 0  # Reset counter if we got a tag
+                    else:
+                        consecutive_timeouts += 1
+                except CF591Error:
+                    # Timeout or error means no more tags
+                    consecutive_timeouts += 1
                 except:
+                    consecutive_timeouts += 1
+                
+                # Safety timeout - don't flush forever
+                if (time.time() - flush_start) > 1.0:  # Max 1 second flushing
                     break
             
-            # Now read for a new tag
+            if flush_count > 0:
+                print(f" (cleared {flush_count} old tag(s))")
+            else:
+                print(" (buffer was empty)")
+            
+            # Small delay after flushing to ensure buffer is truly empty
+            # and to give time for any new tag to be detected
+            time.sleep(0.2)
+            
+            # Now read for a NEW tag (not from buffer)
             tag = None
             start_time = time.time()
             timeout_sec = DEFAULT_TIMEOUT / 1000.0
@@ -128,6 +154,7 @@ def main():
                 while (time.time() - start_time) < timeout_sec:
                     tag = reader.get_tag(timeout=500)  # Poll every 500ms
                     if tag:
+                        # Got a tag - since we flushed aggressively, this should be fresh
                         break
                     time.sleep(0.01)  # Small delay
                 
